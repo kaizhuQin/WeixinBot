@@ -18,6 +18,7 @@ import logging
 from collections import defaultdict
 from urlparse import urlparse
 from lxml import html
+import MySQLdb
 
 # for media upload
 import mimetypes
@@ -80,6 +81,7 @@ class WebWeixin(object):
 
     def __init__(self):
         self.DEBUG = False
+        self.logMsgToDb = True
         self.uuid = ''
         self.base_uri = ''
         self.redirect_uri = ''
@@ -635,6 +637,13 @@ class WebWeixin(object):
                 '&lt;', '<').replace('&gt;', '>')
             message_id = msg['raw_msg']['MsgId']
 
+            if self.logMsgToDb:
+                # self._logMsgToDb(msg)
+                print 'start log msg to db'
+                self._logMsgToDb(msg)
+                # self._logMsgToDb(message_id,srcName,dstName,content)
+                print 'end log msg to db'
+
             if content.find('http://weixin.qq.com/cgi-bin/redirectforward?args=') != -1:
                 # 地理位置消息
                 data = self._get(content).decode('gbk').encode('utf-8')
@@ -1001,10 +1010,18 @@ class WebWeixin(object):
             request.add_header('Range', 'bytes=0-')
         if api == 'webwxgetvideo':
             request.add_header('Range', 'bytes=0-')
-        response = urllib2.urlopen(request)
-        data = response.read()
-        logging.debug(url)
-        return data
+        try:
+            response = urllib2.urlopen(request)
+            data = response.read()
+            logging.debug(url)
+            return data
+        except Exception, e:
+            print e
+            return False
+        # response = urllib2.urlopen(request)
+        # data = response.read()
+        # logging.debug(url)
+        # return data
 
     def _post(self, url, params, jsonfmt=True):
         if jsonfmt:
@@ -1051,6 +1068,110 @@ class WebWeixin(object):
             if pm:
                 return pm.group(1)
         return '未知'
+
+    #将信息存储到数据库中
+    def _handleLogMsgToDb(self,msgId,FromUserName,ToUserName,msgcontent,messageType,GroupName,ChatRoomType):
+        if msgcontent.find("<msg>")!=0 and msgcontent.find("</msg>")!=0:
+            print msgcontent
+            print 'no msg need log'
+            # return 'no msg need log'
+
+        msgId = MySQLdb.escape_string(msgId)
+        FromUserName = MySQLdb.escape_string(FromUserName)
+        ToUserName = MySQLdb.escape_string(ToUserName)
+        msgcontent = MySQLdb.escape_string(msgcontent)
+        GroupName = MySQLdb.escape_string(GroupName)
+        ChatRoomType = MySQLdb.escape_string(ChatRoomType)
+
+        mysqlConnection = MySQLdb.connect(host='127.0.0.1',user='root',passwd='666666',db='weixin')
+        cursor = mysqlConnection.cursor()
+        sql = "insert into user_msg_log_2 (`msgId`,`FromUserName`,ToUserName,`msg_content`,`msgType`,`GroupName`,`ChatRoomType`) values ('%s','%s','%s','%s','%s','%s','%s')"%(msgId,FromUserName,ToUserName,msgcontent,messageType,GroupName,ChatRoomType)
+
+        print sql
+
+        try:
+            cursor.execute(sql)
+            mysqlConnection.commit()
+        except Exception, e:
+            print e
+
+    def _logMsgToDb(self, message):
+
+        srcName = None
+        dstName = None
+        groupName = None
+        content = None
+
+        # 消息发送者
+        FromUserName = None
+        # 消息接收者
+        ToUserName = None
+        # 群名
+        GroupName = ''
+        # 聊天室类型 1＝个人 2＝群聊
+        ChatRoomType = 1
+
+        msg = message
+        logging.debug(msg)
+
+        if msg['raw_msg']:
+            FromUserName = srcName = self.getUserRemarkName(msg['raw_msg']['FromUserName'])
+            ToUserName = dstName = self.getUserRemarkName(msg['raw_msg']['ToUserName'])
+            content = msg['raw_msg']['Content'].replace(
+                '&lt;', '<').replace('&gt;', '>')
+            message_id = msg['raw_msg']['MsgId']
+            message_type = msg['raw_msg']['MsgType']
+
+            if content.find('http://weixin.qq.com/cgi-bin/redirectforward?args=') != -1:
+                # 地理位置消息
+                data = self._get(content).decode('gbk').encode('utf-8')
+                pos = self._searchContent('title', data, 'xml')
+                tree = html.fromstring(self._get(content))
+                url = tree.xpath('//html/body/div/img')[0].attrib['src']
+
+                for item in urlparse(url).query.split('&'):
+                    if item.split('=')[0] == 'center':
+                        loc = item.split('=')[-1:]
+
+                content = '%s 发送了一个 位置消息 - 我在 [%s](%s) @ %s]' % (
+                    srcName, pos, url, loc)
+
+            if msg['raw_msg']['ToUserName'] == 'filehelper':
+                # 文件传输助手
+                dstName = '文件传输助手'
+
+            if msg['raw_msg']['FromUserName'][:2] == '@@':
+                ChatRoomType = 2
+                # 接收到来自群的消息
+                if re.search(":<br/>", content, re.IGNORECASE):
+                    [people, content] = content.split(':<br/>')
+                    groupName = srcName
+                    srcName = self.getUserRemarkName(people)
+                    # dstName = 'GROUP'
+                    GroupName = groupName
+                    ToUserName = srcName
+
+                else:
+                    groupName = srcName
+                    srcName = 'SYSTEM'
+            elif msg['raw_msg']['ToUserName'][:2] == '@@':
+                # 自己发给群的消息
+                groupName = dstName
+                # dstName = 'GROUP'
+                ChatRoomType = 2
+
+            # 收到了红包
+            if content == '收到红包，请在手机上查看':
+                msg['message'] = content
+
+            # 指定了消息内容
+            if 'message' in msg.keys():
+                content = msg['message']
+
+            # self._handleLogMsgToDb(message_id,srcName,dstName,content,message_type)
+            self._handleLogMsgToDb(message_id,FromUserName,ToUserName,content,message_type,GroupName,ChatRoomType)
+
+
 
 
 class UnicodeStreamFilter:
